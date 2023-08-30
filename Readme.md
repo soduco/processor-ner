@@ -41,3 +41,18 @@ ple</LOC>, <CARDINAL>69</CARDINAL>.</ENTRY>
 ci-devant <LOC>Faub. -St-Martin</LOC>, <CARDINAL>147</CARDINAL>,
 ...
 ```
+
+## Docker
+To generate a Docker image ready to run on any Linux platform and use it, follow the process below.
+
+1. Build the image:  
+  `docker build -t soduco/processor-ner .`
+2. (Opt.) Export image from build machine and import it into processing machines:  
+  `docker image save soduco/processor-ner | pigz > soduco-processor-ner.tar.gz`  
+  … copy the image to the target machine and then …
+  `docker image load < soduco-processor-ner.tar.gz`
+3. Create a container
+4. Launch the process, using some bind-mounted input and output directories:  
+  `docker run --name soduco-processor-ner --rm -it -v /work/soduco/202308-reprocess/input/DIR:/input:ro -v /work/soduco/202308-reprocess/output:/output soduco/processor-ner -o /output/DIR-RLO:RHI.xml -f RLO -u RHI` 
+  *Note that you only need to provide the `--output-file`, `--range-from` and `--range-upto` on the command line.*
+
