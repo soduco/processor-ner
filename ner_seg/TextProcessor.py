@@ -102,36 +102,44 @@ def _get_xml_string(source_text: str, named_entities: List[_NamedEntity], espace
     else:
         htmlescape = lambda x: x
 
-    def xmlize(tag, text):
-        match tag:
-            case "EBEGIN": return "<ENTRY>"
-            case "EEND": return "</ENTRY>"
-            case _: return f"<{tag}>{htmlescape(text)}</{tag}>"
+    def xmlize(text: str, tag):
+        # Patch for BERT : the span may start with a whitespace or a <break>.
+        # In this case the leading character is moved in front of the named entity
+        # HACK degueu => a refaire de façon sérieuse
+        before = ""
+        after = ""
+        if text.startswith("<break>"):
+            before = "<break>"
+            text = text.removeprefix('<break>')
+        if text.endswith("<break>"):
+            after = "<break>"
+            text = text.removesuffix('<break>')
+        if text.startswith(("\t", " ")):
+            before = text[0]
+            text = text[1:]
 
+        match tag:
+            case "OTHER": return f"{before}{htmlescape(text)}{after}"
+            case "EBEGIN": return f"{before}{after}<ENTRY>"
+            case "EEND": return f"</ENTRY>{before}{after}"
+            case _:
+                return f"{before}<{tag}>{htmlescape(text.removeprefix('<break>'))}</{tag}>{after}"
+
+                
 
     cursor = 0
     parts = []
     for ent in named_entities:
         if ent.start > cursor:
-            skipped_txt = htmlescape(source_text[cursor : ent.start])
-            parts.append(skipped_txt)
-        span = source_text[ent.start : ent.end]
+            parts.append(   (source_text[cursor : ent.start], "OTHER")  )
 
-        # Patch for BERT : the span may start with a whitespace or a \n.
-        # In this case the leading character is moved in front of the named entity
-        if span.startswith(("\t", " ", "\n")):
-            parts.append(span[0])
-            span = span[1:]
-
-        xml_ent = xmlize(ent.label, span)
-        parts.append(xml_ent)
+        parts.append( (source_text[ent.start : ent.end], ent.label) )
         cursor = ent.end
 
     if cursor < len(source_text):
-        last_words = htmlescape(source_text[cursor:])
-        parts.append(last_words)
+        parts.append( (source_text[cursor:], "OTHER") )
 
-    return "".join(parts)
+    return "".join(itertools.starmap(xmlize, parts))
 
 
 @dataclass
@@ -163,6 +171,8 @@ def _postprocess_chunk(chunk: TextChunk, ne_list) -> TextChunk:
 
     # 3. Split
     chunk.output_lines = xml.split("<break>")
+
+    assert(len(chunk.output_lines) == len(chunk.lines))
 
     return chunk
 
@@ -257,6 +267,7 @@ class Entry:
         return (e.directory, e.page)
 
 
+
 def EntrySplitter(lines: Iterator[Tuple[LineInfo, str]]) -> Iterator[Entry]:
     """
 
@@ -269,19 +280,23 @@ def EntrySplitter(lines: Iterator[Tuple[LineInfo, str]]) -> Iterator[Entry]:
     entry = None
     for lineinfo, lineout in lines:
 
-        if lineout.startswith("<ENTRY>"):
+        if lineout.startswith("<ENTRY>") or lineout.startswith("</ENTRY>"): # HACK for <break></entry><entry>
             if entry is not None:
                 yield entry # FLUSH (unfinished) previous entry
             entry = Entry()
         else:
             entry = entry or Entry()
     
-        entry.text_ocr += lineinfo.text + "\n"
+        entry.text_ocr += lineinfo.text_original + "\n"
+        lineout = re.sub("^(</?ENTRY>)+", "", lineout)
+        lineout = re.sub("(</?ENTRY>)+$", "", lineout)
+        if "ENTRY" in lineout:
+            raise RuntimeError(f"Unexpected ENTRY in '{lineout}'")
         entry.ner_xml += lineout.removeprefix("<ENTRY>").removesuffix("</ENTRY>") + "\n"
         entry.elements.append(lineinfo) 
 
 
-        if lineout.endswith("</ENTRY>"):
+        if lineout.endswith("</ENTRY>") or lineout.endswith("<ENTRY>"): # HACK for </entry><entry><break>
             yield entry # FLUSH current entry
             entry = None
 

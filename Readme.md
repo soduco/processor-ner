@@ -22,7 +22,8 @@ options:
   -f RANGE_FROM, --range-from RANGE_FROM
                         Lower bound of the range, inclusive. Assumes file names match pattern `.*?[0-9]+.json`.
   -u RANGE_UPTO, --range-upto RANGE_UPTO
-                        Upper bound of the range, inclusive. Assumes file names match pattern `.*?[0-9]+.json`. -1 means no limit.
+                        Upper bound of the range, inclusive. Assumes file names match pattern `.*?[0-9]+.json`.
+  --inplace             Edit inplace the json files to add entries inside.
 ```
 
 Example, running the command:

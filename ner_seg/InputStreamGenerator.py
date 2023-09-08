@@ -11,6 +11,7 @@ class LineInfo:
     page: int
     item: int
     text: str
+    text_original: str
 
 
 def InputLineStreamGenerator(jsonfiles: list[pathlib.Path]) -> Iterator[LineInfo]:
@@ -26,5 +27,5 @@ def InputLineStreamGenerator(jsonfiles: list[pathlib.Path]) -> Iterator[LineInfo
                     ltoken = lspaceQ(e["margin-left-relative"])
                     rtoken = rspaceQ(e["margin-right"])
                     line = ltoken + e["text"] + rtoken
-                    yield LineInfo(dir, page, e["id"], line)
+                    yield LineInfo(dir, page, e["id"], line, e["text"])
 
