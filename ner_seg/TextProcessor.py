@@ -2,20 +2,23 @@ import itertools
 import re
 from transformers import pipeline
 from . import TokenizerModel, ClassificationModel
-from typing import Sequence, List, Iterator, Dict, Tuple
-from dataclasses import dataclass
+from typing import Sequence, List, Iterator, Dict, Tuple, Generator, Generic, TypeVar
+from dataclasses import dataclass, field
 from torch.utils.data import IterableDataset
+from .InputStreamGenerator import LineInfo
+
+T = TypeVar("T")
 
 
-class CacheGeneratorWrapper(IterableDataset):
+class CacheGeneratorWrapper(IterableDataset, Generic[T]):
     '''
     This class is a one-time cache, as soon as an element is retrieve, it is removed from the cache
     (It is used to forward line information in a stream process)
     '''
 
-    def __init__(self, dataset):
+    def __init__(self, dataset: Iterator[T]):
         self._ds = dataset
-        self._cache = {}
+        self._cache : Dict[int, T] = {}
 
     def __iter__(self):
         for i, e in enumerate(self._ds):
@@ -28,7 +31,7 @@ class CacheGeneratorWrapper(IterableDataset):
 
 
 
-def chunks(seq, chunksize: int, overlap: int = 0):
+def chunks(seq: Iterator[T], chunksize: int, overlap: int = 0) -> Iterator[List[T]]:
     '''
     >>> list(chunks(range(13), 4, 2))
     Out[34]: 
@@ -131,22 +134,42 @@ def _get_xml_string(source_text: str, named_entities: List[_NamedEntity], espace
     return "".join(parts)
 
 
-def _postprocess_result(results: List[Tuple[str, List[_NamedEntity]]]):
-    rexp = re.compile("<(.hspace-.)>")
+@dataclass
+class TextChunk:
+    lines: List[LineInfo]
+    output_lines: List[str] = None
+    _text: str = None
 
-    # 1. Get the xml encoded strings 
-    xmls = ( _get_xml_string(src, map(_NamedEntity.from_huggingface, ne_list)) for src, ne_list in results)
 
-    # 2. Remove visual tokens
-    xmls = map(lambda x: rexp.sub("", x), xmls)
-
-    # 3. Split
-    xmls = map(lambda x: x.split("<break>"), xmls)
-
-    return xmls
+    def text(self) -> str:
+        if self._text is None:
+            self._text = "<break>".join(x.text for x in self.lines)
+        return self._text
     
 
-def _skipoverlap(lines: List[str], chuncksize: int, overlap: int) -> Iterator[str]:
+    def __iter__(self) -> Iterator[Tuple[LineInfo, str]]:
+        return zip(self.lines, self.output_lines)
+    
+
+
+_rexp = re.compile("<(.hspace-.)>")
+
+def _postprocess_chunk(chunk: TextChunk, ne_list) -> TextChunk:
+    # 1. Get the xml encoded strings 
+    xml = _get_xml_string(chunk.text(), map(_NamedEntity.from_huggingface, ne_list))
+
+    # 2. Remove visual tokens
+    xml = _rexp.sub("", xml) 
+
+    # 3. Split
+    chunk.output_lines = xml.split("<break>")
+
+    return chunk
+
+
+    
+
+def _skipoverlap(lines: List[T], chuncksize: int, overlap: int) -> Iterator[T]:
     """
     We ensure that:
     I = range(i)
@@ -177,8 +200,15 @@ def _skipoverlap(lines: List[str], chuncksize: int, overlap: int) -> Iterator[st
         yield e
 
 
+class _IterDataset(IterableDataset):
+    def __init__(self, generator : Iterator[T]):
+        self.generator = generator
 
-def TextEntityClassification(lines: Sequence[str], overlap = 4, chunk_size = 20) -> Iterator[str]:
+    def __iter__(self) -> Iterator[T]:
+        return self.generator
+
+
+def TextEntityClassification(lines: Iterator[LineInfo], overlap = 4, chunk_size = 20) -> Iterator[Tuple[LineInfo, str]]:
     """Perform NER extraction from a text stream.
     (Fixme: should the input be a io.TextIOBase with readline support ?)
 
@@ -188,23 +218,76 @@ def TextEntityClassification(lines: Sequence[str], overlap = 4, chunk_size = 20)
         chunk_size (int, optional): _description_. Defaults to 20.
 
     Returns:
-        Iterator[str]: The lines of text with ner tags included
+        Iterator[t]: The lines of where the line t is the tuple (input_text, lineinfo, ner output)
     """
     ner = pipeline("ner", model=ClassificationModel.classification_model, tokenizer=TokenizerModel.layout_tokenizer, aggregation_strategy="simple")
 
+
     # Create the text generator for the lines
-    textchunks = ("<break>".join(textlines) for textlines in chunks(lines, chunk_size, overlap))
+    textchunks = (TextChunk(textlines) for textlines in chunks(lines, chunk_size, overlap))
 
     # Cache the generated text batches to retrieve the input text (Lazy)
     gen = CacheGeneratorWrapper(textchunks)
 
-    # Compute the ner on each text chunk (Lazy)
-    results = ( (gen[i], entities) for i,entities in enumerate(ner(gen)) )
+    #
+    textonly = _IterDataset(x.text() for x in gen)
 
-    # Compute the xml of each chunck
-    xmls = _postprocess_result(results)
+    # Compute the ner on each text chunk (Lazy)
+    xmls = ( _postprocess_chunk(gen[i], entities) for i,entities in enumerate(ner(textonly)) )
 
     # Remove overlaps
     xmls = _skipoverlap(itertools.chain.from_iterable(xmls), chunk_size, overlap)
 
     return xmls 
+
+@dataclass
+class Entry:
+    elements: List[LineInfo] = field(default_factory=list) # List of children ids 
+    text_ocr: str = ""
+    ner_xml: str = ""
+
+    def get_dir(self):
+        return self.elements[0].directory
+    
+    def get_page(self):
+        return self.elements[0].page
+    
+    def get_group(self):
+        e = self.elements[0]
+        return (e.directory, e.page)
+
+
+def EntrySplitter(lines: Iterator[Tuple[LineInfo, str]]) -> Iterator[Entry]:
+    """
+
+    Args:
+        lines (Iterator[Tuple[LineInfo, str]]): 
+
+    Yields:
+        Iterator[Entry]: 
+    """
+    entry = None
+    for lineinfo, lineout in lines:
+
+        if lineout.startswith("<ENTRY>"):
+            if entry is not None:
+                yield entry # FLUSH (unfinished) previous entry
+            entry = Entry()
+        else:
+            entry = entry or Entry()
+    
+        entry.text_ocr += lineinfo.text + "\n"
+        entry.ner_xml += lineout.removeprefix("<ENTRY>").removesuffix("</ENTRY>") + "\n"
+        entry.elements.append(lineinfo) 
+
+
+        if lineout.endswith("</ENTRY>"):
+            yield entry # FLUSH current entry
+            entry = None
+
+    ## Flush last entry
+    if entry is not None:
+        yield entry
+    
+
+
