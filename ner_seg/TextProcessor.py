@@ -6,6 +6,7 @@ from typing import Sequence, List, Iterator, Dict, Tuple, Generator, Generic, Ty
 from dataclasses import dataclass, field
 from torch.utils.data import IterableDataset
 from .InputStreamGenerator import LineInfo
+import logging
 
 T = TypeVar("T")
 
@@ -104,7 +105,7 @@ def _get_xml_string(source_text: str, named_entities: List[_NamedEntity], espace
 
     def xmlize(text: str, tag):
         # Patch for BERT : the span may start with a whitespace or a <break>.
-        # In this case the leading character is moved in front of the named entity
+        # In this case the leading character is moved in front or after of the named entity
         # HACK degueu => a refaire de façon sérieuse
         before = ""
         after = ""
@@ -118,12 +119,16 @@ def _get_xml_string(source_text: str, named_entities: List[_NamedEntity], espace
             before = text[0]
             text = text[1:]
 
+
         match tag:
             case "OTHER": return f"{before}{htmlescape(text)}{after}"
             case "EBEGIN": return f"{before}{after}<ENTRY>"
             case "EEND": return f"</ENTRY>{before}{after}"
             case _:
-                return f"{before}<{tag}>{htmlescape(text.removeprefix('<break>'))}</{tag}>{after}"
+                if text == "":
+                    return f"{before}{after}"
+                else:
+                    return f"{before}<{tag}>{htmlescape(text)}</{tag}>{after}"
 
                 
 
@@ -172,7 +177,8 @@ def _postprocess_chunk(chunk: TextChunk, ne_list) -> TextChunk:
     # 3. Split
     chunk.output_lines = xml.split("<break>")
 
-    assert(len(chunk.output_lines) == len(chunk.lines))
+    if len(chunk.output_lines) != len(chunk.lines):
+        logging.error("Unmatched number of lines: {} vs {}".format(len(chunk.output_lines), len(chunk.lines)))
 
     return chunk
 
@@ -279,7 +285,7 @@ def EntrySplitter(lines: Iterator[Tuple[LineInfo, str]]) -> Iterator[Entry]:
     """
     entry = None
     for lineinfo, lineout in lines:
-
+        lineout = lineout.strip()
         if lineout.startswith("<ENTRY>") or lineout.startswith("</ENTRY>"): # HACK for <break></entry><entry>
             if entry is not None:
                 yield entry # FLUSH (unfinished) previous entry
@@ -289,11 +295,11 @@ def EntrySplitter(lines: Iterator[Tuple[LineInfo, str]]) -> Iterator[Entry]:
     
         entry.text_ocr += lineinfo.text_original + "\n"
         lineout = re.sub("^(</?ENTRY>)+", "", lineout)
-        lineout = re.sub("(</?ENTRY>)+$", "", lineout)
+        lineout = re.sub("(</?ENTRY>\W*)+$", "", lineout)
         if "ENTRY" in lineout:
-            raise RuntimeError(f"Unexpected ENTRY in '{lineout}'")
+            logging.error(f"Unexpected ENTRY in '{lineout}'")
         entry.ner_xml += lineout.removeprefix("<ENTRY>").removesuffix("</ENTRY>") + "\n"
-        entry.elements.append(lineinfo) 
+        entry.elements.append(lineinfo)
 
 
         if lineout.endswith("</ENTRY>") or lineout.endswith("<ENTRY>"): # HACK for </entry><entry><break>

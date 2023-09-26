@@ -58,7 +58,7 @@ def export_entries(entries: Iterator[Entry], js: dict|None, out: TextIO|None, di
     for i,e in enumerate(entries):
         if js:
             first = rev[e.elements[0].item]
-            boxes = np.array([ rev[x.item]["box"] for x in e.elements if rev[x.item]["parent"] == first["parent"]])
+            boxes = np.array([ rev[x.item]["box"] for x in e.elements if x.page == page and rev[x.item]["parent"] == first["parent"]])
             boxes[:,2] += boxes[:,0]
             boxes[:,3] += boxes[:,1]
             x1 = boxes[:,0].min()
